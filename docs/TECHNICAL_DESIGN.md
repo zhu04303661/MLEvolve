@@ -62,6 +62,70 @@
 
 搜索节点是整个系统的核心数据实体，代表解空间中的一个候选解决方案。
 
+```mermaid
+classDiagram
+    class SearchNode {
+        +str code
+        +str plan
+        +str prompt_input
+        +str id
+        +float ctime
+        +int step
+        +SearchNode parent
+        +Set~SearchNode~ children
+        +list~str~ _term_out
+        +float exec_time
+        +str exc_type
+        +str analysis
+        +MetricValue metric
+        +bool is_buggy
+        +bool is_valid
+        +str stage
+        +int visits
+        +float total_reward
+        +bool is_terminal
+        +int branch_id
+        +bool from_topk
+        +uct_value(float) float
+        +reached_child_limit(SearchConfig) bool
+        +fetch_child_memory() str
+        +get_root_to_current_trajectory() str
+    }
+
+    class MetricValue {
+        +float value
+        +bool maximize
+        +bool is_worst
+        +__gt__(MetricValue) bool
+    }
+
+    class WorstMetricValue {
+        +None value
+    }
+
+    class ExecutionResult {
+        +list~str~ term_out
+        +float exec_time
+        +str exc_type
+        +dict exc_info
+        +list~tuple~ exc_stack
+    }
+
+    class Journal {
+        +list~SearchNode~ nodes
+        +append(SearchNode)
+        +get_best_node() SearchNode
+        +draft_nodes() list
+        +good_nodes() list
+    }
+
+    SearchNode *-- MetricValue
+    SearchNode *-- ExecutionResult : absorb_exec_result()
+    SearchNode o-- SearchNode : parent/children
+    WorstMetricValue --|> MetricValue
+    Journal *-- SearchNode : 1..*
+```
+
 ```
 SearchNode
 ├── 代码与计划 (Code & Plan)
@@ -224,128 +288,171 @@ MemRecord
 
 ### 2.2 实体关系图
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        AgentSearch                               │
-│  (搜索协调器 - 系统核心)                                          │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   ┌─────────┐  1:N   ┌──────────┐  1:N   ┌──────────────┐      │
-│   │ Journal │◄───────│SearchNode│◄───────│ SearchNode   │      │
-│   │ (解树)  │        │ (根节点)  │ parent │  (子节点)    │      │
-│   └─────────┘        └──────────┘        └──────────────┘      │
-│        │                  │                      │               │
-│        │                  │has                   │has             │
-│        │                  ▼                      ▼               │
-│        │            ┌──────────┐          ┌──────────────┐      │
-│        │            │MetricValue│          │ExecutionResult│      │
-│        │            └──────────┘          └──────────────┘      │
-│        │                                                         │
-│   ┌────▼────────┐        ┌──────────────────┐                   │
-│   │ Solution    │        │ GlobalMemoryLayer │                   │
-│   │  Manager    │        │  ┌─────────────┐  │                   │
-│   │ (解管理器)  │        │  │ MemRecord   │  │                   │
-│   └─────────────┘        │  │ Retriever   │  │                   │
-│                          │  │ EmbedModel  │  │                   │
-│                          └──────────────────┘                   │
-│                                                                  │
-│  ┌────────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐   │
-│  │DraftAgent  │  │ImproveAgent│  │DebugAgent│  │FusionAgent│   │
-│  └────────────┘  └────────────┘  └──────────┘  └──────────┘   │
-│  ┌────────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐   │
-│  │EvolutionAg │  │AggregationA│  │CodeReview│  │ResultParse│   │
-│  └────────────┘  └────────────┘  └──────────┘  └──────────┘   │
-│                                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐                    │
-│  │ Planner  │   │  Coder   │   │Interpreter│                    │
-│  │(规划器)  │   │(代码生成)│   │(执行器)   │                    │
-│  └──────────┘   └──────────┘   └──────────┘                    │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+erDiagram
+    AgentSearch ||--|| Journal : "管理"
+    AgentSearch ||--|| GlobalMemoryLayer : "可选持有"
+    AgentSearch ||--o{ SearchNode : "branch_all_nodes"
+    AgentSearch }|--|{ Agent : "调度"
 
-关系说明：
-  ◄──── : 1:N 组合关系（Journal 包含多个 SearchNode）
-  ─────►: 依赖/使用关系
-  parent: SearchNode 之间的父子链，构成搜索树
+    Journal ||--o{ SearchNode : "有序包含"
+
+    SearchNode ||--o| MetricValue : "持有"
+    SearchNode ||--o| ExecutionResult : "持有"
+    SearchNode o|--o| SearchNode : "parent-child"
+
+    GlobalMemoryLayer ||--o{ MemRecord : "存储"
+    GlobalMemoryLayer ||--|| HybridRetriever : "使用"
+    HybridRetriever ||--|| EmbeddingModel : "使用"
+
+    SearchNode {
+        string id PK "UUID"
+        string code "Python 解决方案代码"
+        string plan "自然语言设计描述"
+        string stage "root|draft|improve|debug|evolution|fusion|fusion_draft"
+        int visits "MCTS 访问次数"
+        float total_reward "累计奖励"
+        bool is_buggy "是否有 bug"
+        bool is_terminal "是否终止"
+        int branch_id "所属分支 ID"
+    }
+
+    MetricValue {
+        float value "指标数值"
+        bool maximize "优化方向"
+    }
+
+    ExecutionResult {
+        list term_out "终端输出"
+        float exec_time "执行耗时"
+        string exc_type "异常类型"
+    }
+
+    MemRecord {
+        string record_id PK "node_UUID"
+        string description "方案计划"
+        string method "代码摘要"
+        int label "+1改进 | 0持平 | -1退步"
+    }
+
+    Journal {
+        list nodes "SearchNode 有序列表"
+    }
+```
+
+```mermaid
+graph TB
+    subgraph "AgentSearch 协调器"
+        AS[AgentSearch]
+    end
+
+    subgraph "Agent 层"
+        DA[DraftAgent]
+        IA[ImproveAgent]
+        DBA[DebugAgent]
+        EA[EvolutionAgent]
+        FA[FusionAgent]
+        AA[AggregationAgent]
+        CRA[CodeReviewAgent]
+        RPA[ResultParseAgent]
+    end
+
+    subgraph "子系统"
+        PL[Planner 规划器]
+        CD[Coder 代码生成器]
+        INT[Interpreter 执行器]
+    end
+
+    AS -->|调度| DA & IA & DBA & EA & FA & AA
+    AS -->|代码审查| CRA
+    AS -->|结果解析| RPA
+    DA & IA & EA & FA --> PL
+    DA & IA & DBA & EA & FA & AA --> CD
+    AS -->|代码执行| INT
 ```
 
 ### 2.3 状态机模型
 
 #### 2.3.1 SearchNode 生命周期状态
 
-```
-                    ┌───────────────┐
-                    │   Created     │ (代码已生成)
-                    └───────┬───────┘
-                            │
-                    ┌───────▼───────┐
-              ┌─────┤  Code Review  │ (代码审查)
-              │     └───────┬───────┘
-              │             │
-              │     ┌───────▼───────┐
-              │     │  Executing    │ (子进程执行中)
-              │     └───────┬───────┘
-              │             │
-              │     ┌───────▼───────┐
-              │     │  Parsing      │ (LLM 解析执行结果)
-              │     └───────┬───────┘
-              │             │
-              │     ┌───────▼───────┐
-              │     │  Validating   │ (格式 + 内容质量验证)
-              │     └───────┬───────┘
-              │             │
-              ├─────┬───────┴───────┬─────────┐
-              │     │               │         │
-     ┌────────▼─┐ ┌─▼────────┐ ┌───▼───┐ ┌───▼──────┐
-     │  Buggy   │ │ Valid &   │ │Invalid│ │ Terminal  │
-     │ (有bug)  │ │ Improved  │ │(无效) │ │ (终止)   │
-     └──────────┘ └──────────┘ └───────┘ └──────────┘
-         │              │                      │
-         │ debug_agent  │ improve/evolve/fuse  │
-         ▼              ▼                      │
-     ┌──────────────────────┐                  │
-     │   New SearchNode     │◄─────────────────┘
-     │   (子节点)           │    (回溯到父节点选新路径)
-     └──────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Created: Agent 生成 plan + code
+
+    Created --> CodeReview: code_review_agent
+    CodeReview --> Executing: 提交到 Interpreter
+
+    Executing --> Parsing: ExecutionResult 返回
+    Parsing --> Validating: LLM 解析完成
+
+    Validating --> Buggy: 有错误/异常/无指标/无提交文件
+    Validating --> Valid: 格式正确 + 内容合格
+    Validating --> Invalid: 格式验证失败
+    Validating --> Terminal: 达到最大改进失败深度
+
+    Buggy --> Created: debug_agent 生成修复代码
+    Valid --> Created: improve/evolution/fusion_agent 生成改进
+    Invalid --> Created: debug_agent 修复格式
+    Terminal --> [*]: 回溯到父节点选择新路径
+
+    note right of Buggy
+        is_buggy = True
+        触发 DebugAgent
+    end note
+
+    note right of Valid
+        is_buggy = False
+        metric 有效
+        触发 Improve/Evolution/Fusion
+    end note
 ```
 
 #### 2.3.2 搜索阶段切换状态机
 
-```
-                    ┌──────────┐
-          ┌────────►│  Root    │◄────────────────────────┐
-          │  (达到  │(虚拟根)  │ (回溯到根)               │
-          │  上限)  └────┬─────┘                          │
-          │              │ select()                       │
-          │         ┌────▼─────┐                          │
-          │         │  Draft   │──(regular draft)──┐      │
-          │         │(初始草案) │                    │      │
-          │         └────┬─────┘                    │      │
-          │              │ (child_limit)            │      │
-          │         ┌────▼──────────┐               │      │
-          │         │ Aggregation   │               │      │
-          │         │(多分支聚合草案)│               │      │
-          │         └───────────────┘               │      │
-          │                                         │      │
-          │         ┌──────────────┐                │      │
-          ├─────────┤  is_buggy?   │◄───────────────┘      │
-          │         └──┬───────┬───┘                       │
-          │      True  │       │ False                     │
-          │         ┌──▼──┐  ┌─▼──────────┐                │
-          │         │Debug│  │ Stagnant?  │                │
-          │         └─────┘  └─┬────────┬─┘                │
-          │                Yes │        │ No               │
-          │            ┌───────▼──┐  ┌──▼──────┐           │
-          │            │t > 50%?  │  │ Improve │           │
-          │            └──┬────┬──┘  └─────────┘           │
-          │          Yes  │    │ No                         │
-          │      ┌────────▼┐ ┌▼──────────┐                 │
-          │      │Fusion or│ │ Evolution │                 │
-          │      │Evolution│ └───────────┘                 │
-          │      │(随机)   │                               │
-          │      └─────────┘                               │
-          │                                                │
-          └──────(terminal/max_improve_failure)────────────┘
+```mermaid
+flowchart TD
+    Root["🌳 Root 虚拟根节点"]
+    ChildLimit{"达到 child_limit?"}
+    Draft["📝 Draft 初始草案"]
+    Aggregation["🔗 Aggregation 多分支聚合草案"]
+    IsBuggy{"节点 is_buggy?"}
+    Debug["🔧 Debug 调试修复"]
+    Stagnant{"分支停滞?"}
+    Improve["📈 Improve 常规改进"]
+    TimeCheck{"搜索时间 > 50%?"}
+    Evolution["🧬 Evolution 分支内进化"]
+    FusionRandom{"random < 0.3?"}
+    Fusion["🔀 Fusion 跨分支融合"]
+    Terminal["⏹ Terminal / 回溯"]
+
+    Root -->|"select()"| ChildLimit
+    ChildLimit -->|否| Draft
+    ChildLimit -->|"是 + 融合条件满足"| Aggregation
+    Draft --> IsBuggy
+    Aggregation --> IsBuggy
+    IsBuggy -->|True| Debug
+    IsBuggy -->|False| Stagnant
+    Debug -->|子节点| IsBuggy
+    Stagnant -->|否| Improve
+    Stagnant -->|是| TimeCheck
+    TimeCheck -->|否| Evolution
+    TimeCheck -->|是| FusionRandom
+    FusionRandom -->|是| Fusion
+    FusionRandom -->|否| Evolution
+    Improve -->|子节点| IsBuggy
+    Evolution -->|子节点| IsBuggy
+    Fusion -->|子节点| IsBuggy
+    Improve -->|"max_failure 达到"| Terminal
+    Terminal -->|"回溯 backpropagate"| Root
+
+    style Root fill:#e1f5fe
+    style Draft fill:#f3e5f5
+    style Debug fill:#fff3e0
+    style Improve fill:#e8f5e9
+    style Evolution fill:#fce4ec
+    style Fusion fill:#fff9c4
+    style Aggregation fill:#f3e5f5
+    style Terminal fill:#ffebee
 ```
 
 ---
@@ -354,88 +461,139 @@ MemRecord
 
 ### 3.1 系统启动时序
 
-```
-用户
-  │
-  │ python run.py key=value ...
-  ▼
-run.py::run()
-  │
-  ├─(1)─► load_cfg() ──► OmegaConf.load(config.yaml) + CLI merge
-  │                  └──► prep_cfg() → 生成 exp_name, 创建目录
-  │
-  ├─(2)─► set_global_seed(cfg.agent.seed)
-  │
-  ├─(3)─► setup_logging(cfg) → RichHandler + FileHandler
-  │
-  ├─(4)─► load_task_desc(cfg)
-  │       └── 读取 desc_file 或构造 {goal, eval}
-  │
-  ├─(5)─► [如果 coldstart] build_guidance_description(cfg)
-  │       ├── classify_tasks.py → 任务分类 JSON 查找
-  │       └── knowledge.py → 模型指导描述
-  │
-  ├─(6)─► prep_agent_workspace(cfg)
-  │       ├── 创建 input/ working/ submission/ 目录
-  │       └── copytree(data_dir → workspace/input)
-  │
-  ├─(7)─► Journal() → 空解树
-  │
-  ├─(8)─► AgentSearch(task_desc, cfg, journal)
-  │       ├── 创建 virtual_root (SearchNode, stage="root")
-  │       ├── determine_metric_direction() → LLM 判定指标方向
-  │       └── [可选] 初始化 GlobalMemoryLayer
-  │
-  ├─(9)─► Interpreter(workspace_dir, timeout, max_parallel_run)
-  │       └── 分配 CPU 核和执行槽位
-  │
-  └─(10)► 进入主循环 (Phase 1 + Phase 2)
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant Run as run.py
+    participant Cfg as Config
+    participant ColdStart as ColdStart
+    participant WS as Workspace
+    participant AS as AgentSearch
+    participant LLM as LLM Service
+    participant Interp as Interpreter
+
+    User->>Run: python run.py key=value ...
+
+    Run->>Cfg: (1) load_cfg()
+    Cfg->>Cfg: OmegaConf.load(config.yaml) + CLI merge
+    Cfg->>Cfg: prep_cfg() → 生成 exp_name, 创建目录
+    Cfg-->>Run: Config 对象
+
+    Run->>Run: (2) set_global_seed(seed=42)
+    Run->>Run: (3) setup_logging()
+    Run->>Cfg: (4) load_task_desc()
+    Cfg-->>Run: task_desc
+
+    opt coldstart 启用
+        Run->>ColdStart: (5) build_guidance_description()
+        ColdStart->>ColdStart: 任务分类 JSON 查找
+        ColdStart->>ColdStart: 模型指导描述生成
+        ColdStart-->>Run: guidance_description
+    end
+
+    Run->>WS: (6) prep_agent_workspace()
+    WS->>WS: 创建 input/working/submission/ 目录
+    WS->>WS: copytree(data_dir → workspace/input)
+
+    Run->>AS: (7-8) AgentSearch(task_desc, cfg, Journal())
+    AS->>AS: 创建 virtual_root (stage="root")
+    AS->>LLM: determine_metric_direction()
+    LLM-->>AS: {maximize: true/false}
+    opt 全局记忆启用
+        AS->>AS: 初始化 GlobalMemoryLayer
+    end
+
+    Run->>Interp: (9) Interpreter(workspace_dir, timeout)
+    Interp->>Interp: 分配 CPU 核和执行槽位
+
+    Run->>Run: (10) 进入主循环 (Phase 1 + Phase 2)
 ```
 
 ### 3.2 搜索主循环时序
 
 MLEvolve 的搜索主循环分两个阶段执行：
 
-```
-Phase 1: 顺序草案生成 (Sequential Draft Generation)
-═══════════════════════════════════════════════════
+```mermaid
+flowchart TB
+    subgraph Phase1["Phase 1: 顺序草案生成"]
+        direction TB
+        P1Start["开始"] --> P1Loop{"i < initial_drafts?"}
+        P1Loop -->|是| P1Step["agent.step(execute_immediately=False)"]
+        P1Step --> P1Draft["draft_agent.run() → 生成代码"]
+        P1Draft --> P1Review["code_review_agent.run() → 审查"]
+        P1Review --> P1Append["pending_draft_nodes.append(node)"]
+        P1Append --> P1Loop
+        P1Loop -->|否| P1End["Phase 1 完成"]
+    end
 
-for i in range(initial_drafts):
-  │
-  ├─► agent.step(node=None, execute_immediately=False)
-  │   ├─► select_with_soft_switch() → virtual_root
-  │   ├─► draft_agent.run() → 生成代码 (不执行)
-  │   ├─► code_review_agent.run() → 代码审查
-  │   └─► 返回 pending_execution=True 的节点
-  │
-  └─► pending_draft_nodes.append(node)
+    subgraph Phase2["Phase 2: 管线化并行执行"]
+        direction TB
+        P2Start["ThreadPoolExecutor(max_workers=3)"]
+        P2Submit["提交 pending_draft_nodes 执行任务"]
+        P2Fill["提交初始 step_task 填充线程池"]
+        P2Wait{"wait(FIRST_COMPLETED)"}
+        P2Process["处理完成的 future"]
+        P2Save["save_run() → 保存 journal.json"]
+        P2Check{"completed < total_steps<br>且线程池未满?"}
+        P2New["提交新 step_task(cur_node)"]
+        P2Done["搜索完成"]
 
+        P2Start --> P2Submit --> P2Fill --> P2Wait
+        P2Wait -->|有完成| P2Process --> P2Save --> P2Check
+        P2Wait -->|超时| P2Wait
+        P2Check -->|是| P2New --> P2Wait
+        P2Check -->|否| P2Done
+    end
 
-Phase 2: 管线化并行执行 (Pipelined Parallel Execution)
-═══════════════════════════════════════════════════════
+    Phase1 --> Phase2
 
-ThreadPoolExecutor(max_workers=parallel_search_num)
-  │
-  ├─► 提交所有 pending_draft_nodes 的执行任务
-  │   └─► execute_deferred_node() → 执行 + 解析 + 评估
-  │
-  ├─► 提交初始 step_task 填充线程池
-  │
-  └─► while completed < total_steps:
-        │
-        ├─► wait(futures, FIRST_COMPLETED)
-        │
-        ├─► 处理完成的 future
-        │   ├─► save_run() → 保存 journal.json
-        │   └─► 更新 completed 计数
-        │
-        └─► 如果线程池未满且步数未完成
-            └─► 提交新的 step_task(cur_node)
+    style Phase1 fill:#e8f5e9,stroke:#43a047
+    style Phase2 fill:#e3f2fd,stroke:#1e88e5
 ```
 
 ### 3.3 节点生成与执行时序
 
 每次 `agent.step()` 调用的详细时序：
+
+```mermaid
+sequenceDiagram
+    participant Main as 主循环
+    participant AS as AgentSearch
+    participant NS as NodeSelection
+    participant Agt as Agent (Draft/Improve/Debug/...)
+    participant CR as CodeReviewAgent
+    participant Exec as Interpreter
+    participant RP as ResultParseAgent
+    participant Eval as Evaluation
+    participant SM as SolutionManager
+
+    Main->>AS: step(node, exec_callback)
+    AS->>NS: select_with_soft_switch()
+    NS-->>AS: selected_node
+
+    AS->>Agt: run(parent_node)
+    Note over Agt: LLM 生成 plan + code
+    Agt-->>AS: new SearchNode
+
+    AS->>CR: run(new_node)
+    CR-->>AS: reviewed_code
+
+    AS->>Exec: exec_callback(code, id)
+    Note over Exec: subprocess 执行 Python 代码
+    Exec-->>AS: ExecutionResult
+
+    AS->>RP: run(node, exec_result)
+    Note over RP: LLM 解析 + 格式验证 + 泄露检测
+    RP-->>AS: evaluated SearchNode
+
+    AS->>Eval: check_improvement(cur_node, parent)
+    Eval-->>AS: should_backpropagate?
+
+    AS->>SM: update_best_solution(node)
+    SM->>SM: update_top_candidates + save
+
+    AS-->>Main: result_node
+```
 
 ```
 agent.step(node, exec_callback)
@@ -509,28 +667,46 @@ agent.step(node, exec_callback)
 
 ### 3.4 并行执行时序
 
-```
-主线程                    工作线程 1          工作线程 2          工作线程 3
-  │                          │                   │                   │
-  ├─ submit(draft_exec_1) ──►│                   │                   │
-  ├─ sleep(10s)              │ execute()         │                   │
-  ├─ submit(draft_exec_2) ──►│   │               │                   │
-  ├─ sleep(10s)              │   │               │ execute()         │
-  ├─ submit(draft_exec_3) ──►│   │               │   │               │
-  │                          │   │               │   │               │ execute()
-  │                          │   │               │   │               │   │
-  ├─ wait(FIRST_COMPLETED)   │   ▼               │   │               │   │
-  │         ◄────────────────┤ done!             │   │               │   │
-  │                          │                   │   │               │   │
-  ├─ save_run()              │                   │   │               │   │
-  ├─ submit(step_task) ──────►                   │   ▼               │   │
-  │                          │ step()            │ done!             │   │
-  ├─ wait(FIRST_COMPLETED)   │   │               │                   │   │
-  │         ◄────────────────┤   │               │                   │   ▼
-  │                          │   │               │                   │ done!
-  ├─ save_run()              │   │               │                   │
-  ├─ submit(step_task) ──────►   │               │                   │
-  │                  ...     │   │       ...     │           ...     │
+```mermaid
+sequenceDiagram
+    participant M as 主线程
+    participant W1 as 工作线程 1<br>(CPU 0-6)
+    participant W2 as 工作线程 2<br>(CPU 7-13)
+    participant W3 as 工作线程 3<br>(CPU 14-20)
+
+    M->>W1: submit(draft_exec_1)
+    activate W1
+    Note over M: sleep(10s)
+    M->>W2: submit(draft_exec_2)
+    activate W2
+    Note over M: sleep(10s)
+    M->>W3: submit(draft_exec_3)
+    activate W3
+
+    Note over M: wait(FIRST_COMPLETED)
+    W1-->>M: done! (ExecutionResult)
+    deactivate W1
+    M->>M: save_run()
+    M->>W1: submit(step_task)
+    activate W1
+
+    Note over M: wait(FIRST_COMPLETED)
+    W2-->>M: done! (ExecutionResult)
+    deactivate W2
+    M->>M: save_run()
+    M->>W2: submit(step_task)
+    activate W2
+
+    W3-->>M: done! (ExecutionResult)
+    deactivate W3
+    M->>M: save_run()
+    M->>W3: submit(step_task)
+    activate W3
+
+    Note over W1,W3: ... 持续并行执行直到 completed >= total_steps ...
+    deactivate W1
+    deactivate W2
+    deactivate W3
 ```
 
 **CPU 亲和性分配**：
@@ -540,40 +716,43 @@ agent.step(node, exec_callback)
 
 ### 3.5 结果解析与评估时序
 
-```
-result_parse_agent.run(agent, node, exec_result)
-  │
-  ├─(1)─► node.absorb_exec_result(exec_result)
-  │       └── 将 term_out, exec_time, exc_* 写入节点
-  │
-  ├─(2)─► LLM query(func_spec=review_func_spec)
-  │       ├── 输入: code + execution output
-  │       ├── 输出: {is_bug, summary, metric, lower_is_better, [code_summary]}
-  │       └── 字段校验与类型修正
-  │
-  ├─(3)─► _check_submission_file()
-  │       └── 检查 submission/submission_{id}.csv 是否存在
-  │
-  ├─(4)─► _determine_buggy(node, response, has_csv)
-  │       └── 综合判定 is_buggy (错误 | 异常 | 无指标 | 无文件)
-  │
-  ├─(5)─► [非 buggy] _validate_format_with_retry()
-  │       ├── HTTP POST /validate → mlebench 格式验证
-  │       ├── 失败 → LLM 辅助修复 → 重试验证
-  │       └── validate_submission_content_quality()
-  │           └── 检查是否有 >95% 常量列 (防止假预测)
-  │
-  ├─(6)─► [非 buggy] _validate_metric_direction()
-  │       ├── 比较 LLM 返回的 lower_is_better 与预设方向
-  │       └── 不一致 → 标记为 buggy
-  │
-  ├─(7)─► [非 buggy] _check_data_leakage()
-  │       ├── metric == 1.0 (max) 或 == 0.0 (min) ?
-  │       ├── 是 → data_leakage_agent.run() → LLM 代码审查
-  │       └── 高/中置信度泄露 → 标记为 buggy
-  │
-  └─(8)─► _save_to_global_memory()
-          └── [非 buggy 且有有效指标] → GlobalMemoryLayer.save_node()
+```mermaid
+flowchart TD
+    Start["result_parse_agent.run()"] --> Absorb["(1) node.absorb_exec_result()<br>写入 term_out, exec_time, exc_*"]
+    Absorb --> LLMQuery["(2) LLM query → 解析结果<br>{is_bug, summary, metric, lower_is_better}"]
+    LLMQuery --> CheckCSV["(3) _check_submission_file()<br>检查 submission_{id}.csv"]
+    CheckCSV --> Buggy["(4) _determine_buggy()<br>综合判定: 错误|异常|无指标|无文件"]
+
+    Buggy --> IsBuggy{"is_buggy?"}
+    IsBuggy -->|是| SetWorst["metric = WorstMetricValue()"]
+    IsBuggy -->|否| Format["(5) _validate_format_with_retry()<br>HTTP POST /validate → mlebench"]
+
+    Format --> FormatOK{"格式有效?"}
+    FormatOK -->|否| LLMFix["LLM 辅助修复 → 重试"]
+    LLMFix --> FormatOK
+    FormatOK -->|是| Quality["validate_submission_content_quality()<br>常量列 >95% 检测"]
+
+    Quality --> QualityOK{"内容合格?"}
+    QualityOK -->|否| SetWorst
+    QualityOK -->|是| MetricDir["(6) _validate_metric_direction()<br>lower_is_better vs 预设方向"]
+
+    MetricDir --> DirOK{"方向一致?"}
+    DirOK -->|否| SetWorst
+    DirOK -->|是| Leakage["(7) _check_data_leakage()"]
+
+    Leakage --> IsExtreme{"metric 极端?<br>1.0(max) 或 0.0(min)"}
+    IsExtreme -->|否| Save
+    IsExtreme -->|是| LeakageCheck["data_leakage_agent.run()<br>LLM 代码审查"]
+    LeakageCheck --> HasLeak{"有泄露?<br>(高/中置信度)"}
+    HasLeak -->|是| SetWorst
+    HasLeak -->|否| Save
+
+    SetWorst --> Save["(8) _save_to_global_memory()<br>非buggy且有效指标 → GlobalMemoryLayer"]
+    Save --> End["返回 evaluated SearchNode"]
+
+    style Start fill:#e3f2fd
+    style SetWorst fill:#ffebee
+    style End fill:#e8f5e9
 ```
 
 ---
@@ -586,24 +765,73 @@ MLEvolve 的核心算法基于蒙特卡洛树搜索 (MCTS) 的变体，将其扩
 
 **搜索树结构**：
 
-```
-                     virtual_root (stage="root")
-                    /        |        \
-               Draft_1    Draft_2    Draft_3     ← 各自开启独立分支
-              /   |  \      |  \       |
-         Imp_1 Imp_2 Dbg  Imp_3 Evo  Imp_4      ← 改进/调试/进化
-          |     |          |           |
-        Imp_5 Fus_1      Imp_6      Fus_2       ← 融合可跨分支引用
-          |               |
-        Evo_1           Imp_7
+```mermaid
+graph TD
+    VR["🌳 virtual_root<br>(stage=root)"]
+
+    D1["📝 Draft_1<br>Branch 1"]
+    D2["📝 Draft_2<br>Branch 2"]
+    D3["📝 Draft_3<br>Branch 3"]
+
+    I1["📈 Imp_1"]
+    I2["📈 Imp_2"]
+    DBG["🔧 Debug"]
+    I3["📈 Imp_3"]
+    EVO1["🧬 Evo"]
+    I4["📈 Imp_4"]
+
+    I5["📈 Imp_5"]
+    FUS1["🔀 Fusion_1"]
+    I6["📈 Imp_6"]
+    FUS2["🔀 Fusion_2"]
+
+    EVO2["🧬 Evo_1"]
+    I7["📈 Imp_7"]
+
+    VR --> D1 & D2 & D3
+    D1 --> I1 & I2 & DBG
+    D2 --> I3 & EVO1
+    D3 --> I4
+    I1 --> I5
+    I2 --> FUS1
+    I3 --> I6
+    I4 --> FUS2
+    I5 --> EVO2
+    I6 --> I7
+
+    FUS1 -.->|"跨分支参考"| D2
+    FUS2 -.->|"跨分支参考"| D1
+
+    style VR fill:#e1f5fe,stroke:#0288d1
+    style D1 fill:#f3e5f5
+    style D2 fill:#f3e5f5
+    style D3 fill:#f3e5f5
+    style FUS1 fill:#fff9c4
+    style FUS2 fill:#fff9c4
+    style DBG fill:#fff3e0
+    style EVO1 fill:#fce4ec
+    style EVO2 fill:#fce4ec
 ```
 
 **搜索循环的四个阶段 (对应 MCTS)**：
 
-1. **选择 (Selection)**: `select_with_soft_switch()` → UCT 或 Top-K 选择
-2. **扩展 (Expansion)**: Agent 生成新的 plan + code → 新 SearchNode
-3. **模拟 (Simulation)**: `Interpreter.run()` → 执行代码获取 metric
-4. **反向传播 (Backpropagation)**: `backpropagate()` → 更新祖先节点的 visits/reward
+```mermaid
+graph LR
+    S["1️⃣ 选择<br>Selection"]
+    E["2️⃣ 扩展<br>Expansion"]
+    M["3️⃣ 模拟<br>Simulation"]
+    B["4️⃣ 反向传播<br>Backpropagation"]
+
+    S -->|"select_with_soft_switch()<br>UCT or Top-K"| E
+    E -->|"Agent 生成<br>plan + code"| M
+    M -->|"Interpreter.run()<br>执行代码获取 metric"| B
+    B -->|"backpropagate()<br>更新 visits/reward"| S
+
+    style S fill:#e3f2fd
+    style E fill:#e8f5e9
+    style M fill:#fff3e0
+    style B fill:#fce4ec
+```
 
 ### 4.2 UCT 选择算法
 
@@ -655,25 +883,26 @@ exploration_weight(t) =
   ⎩ min_weight (0.2),                              if t/T ≥ switch_end
 ```
 
-```
- 探索权重
- 1.0 ─────────┐
-              │
-              │
-              └────────┐
-                       └────────────── 0.2
-   ─────┬──────────┬───────────┬──── 时间进度
-        0        0.5         0.7     1.0
-              switch_start  switch_end
+```mermaid
+xychart-beta
+    title "探索权重 vs 时间进度"
+    x-axis "时间进度 (t/T)" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    y-axis "探索权重" 0 --> 1.1
+    line [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.6, 0.2, 0.2, 0.2, 0.2]
 ```
 
 **选择逻辑**：
 
-```python
-if random() < exploration_weight:
-    return select(virtual_root)      # UCT 探索 (宽搜)
-else:
-    return select_from_top_k()       # Top-K 利用 (深搜)
+```mermaid
+flowchart LR
+    R["random()"]
+    CMP{"< exploration_weight?"}
+    UCT["🔍 UCT 探索<br>select(virtual_root)<br>宽度优先"]
+    TopK["🎯 Top-K 利用<br>select_from_top_k()<br>深度优先"]
+
+    R --> CMP
+    CMP -->|是| UCT
+    CMP -->|否| TopK
 ```
 
 **Top-K 参数随时间变化**：
@@ -757,14 +986,26 @@ if success_patience >= 2 or total_patience >= 5:
 
 当检测到停滞时，系统自动切换策略：
 
-```
-分支停滞?
-  ├─ 否 → improve_agent (常规改进)
-  └─ 是 → 搜索时间 > 50%?
-        ├─ 否 → evolution_agent (分支内进化)
-        └─ 是 → random < fusion_vs_evolution_prob (0.3)?
-              ├─ 是 → fusion_agent (跨分支融合)
-              └─ 否 → evolution_agent (分支内进化)
+```mermaid
+flowchart TD
+    Start{"分支停滞?"}
+    TimeCheck{"搜索时间 > 50%?"}
+    ProbCheck{"random < 0.3?<br>(fusion_vs_evolution_prob)"}
+
+    Improve["📈 improve_agent<br>常规改进"]
+    Evolution["🧬 evolution_agent<br>分支内进化"]
+    Fusion["🔀 fusion_agent<br>跨分支融合"]
+
+    Start -->|否| Improve
+    Start -->|是| TimeCheck
+    TimeCheck -->|否| Evolution
+    TimeCheck -->|是| ProbCheck
+    ProbCheck -->|是| Fusion
+    ProbCheck -->|否| Evolution
+
+    style Improve fill:#e8f5e9
+    style Evolution fill:#fce4ec
+    style Fusion fill:#fff9c4
 ```
 
 ### 4.6 反向传播与奖励计算
@@ -829,6 +1070,48 @@ def backpropagate(node, value, add_to_tree=True):
 
 `check_improvement` 决定是否触发反向传播，这是搜索策略的核心判断点：
 
+```mermaid
+flowchart TD
+    Start["check_improvement(cur_node, parent)"]
+
+    subgraph Force["强制反向传播检查"]
+        Late{">80% 时间?"}
+        LateProb{"random < 0.5?"}
+        Mid{">40% 时间?"}
+        MidMod{"节点数 % 3 == 0?"}
+        Smart{"是近期最佳?"}
+    end
+
+    Late -->|是| LateProb
+    LateProb -->|是| Smart
+    Late -->|否| Mid
+    Mid -->|是| MidMod
+    MidMod -->|是| Smart
+    Mid -->|否| NormalEval
+    LateProb -->|否| NormalEval
+    MidMod -->|否| NormalEval
+    Smart -->|是| NormalEval["跳过强制回溯"]
+    Smart -->|否| ForceBack["强制 backpropagate()"]
+
+    Start --> Late
+
+    NormalEval --> ImpCalc["improvement = cur_metric - local_best"]
+    ImpCalc --> ImpCheck{"improvement < threshold?"}
+
+    ImpCheck -->|"是 且 depth < max"| Continue["continue_improve = True<br>failure_depth++"]
+    ImpCheck -->|"是 且 depth >= max"| Terminal["is_terminal = True<br>回溯"]
+    ImpCheck -->|否| Better["更新 local_best_node<br>continue_improve = True"]
+
+    Continue --> NoBack["不回溯 → 继续深入"]
+    Terminal --> DoBack["backpropagate()"]
+    ForceBack --> DoBack
+
+    style ForceBack fill:#ffebee
+    style DoBack fill:#ffebee
+    style NoBack fill:#e8f5e9
+    style Better fill:#e8f5e9
+```
+
 ```
 check_improvement(cur_node, parent_node)
   │
@@ -883,21 +1166,33 @@ check_improvement(cur_node, parent_node)
 
 #### 4.7.3 融合策略层次
 
-```
-Fusion 策略
-├── 分支内融合 (Intra-branch)
-│   └── Evolution Agent: 基于当前分支的完整进化轨迹进行改进
-│       └── 分析历史成功/失败模式，提出新策略
-│
-├── 跨分支融合 (Cross-branch)
-│   └── Fusion Agent: 从其他分支的最优节点汲取经验
-│       ├── fuse_two_nodes(): 单参考方案融合
-│       └── _fuse_with_multiple_references(): 多参考方案融合 (≤5)
-│
-└── 多分支聚合 (Multi-branch Aggregation)
-    └── Aggregation Agent: 综合所有分支最佳方案创建全新解
-        ├── node 模式: 分析各分支最佳节点的最终方案
-        └── trajectory 模式: 分析各分支的完整进化路径
+```mermaid
+graph TB
+    subgraph L1["Level 1: 分支内融合 (Intra-branch)"]
+        EA["🧬 Evolution Agent"]
+        EA --> EA1["分析当前分支完整进化轨迹"]
+        EA --> EA2["识别成功/失败模式"]
+        EA --> EA3["提出新改进策略"]
+    end
+
+    subgraph L2["Level 2: 跨分支融合 (Cross-branch)"]
+        FA["🔀 Fusion Agent"]
+        FA --> FA1["fuse_two_nodes()<br>单参考方案融合"]
+        FA --> FA2["_fuse_with_multiple_references()<br>多参考方案融合 (≤5)"]
+    end
+
+    subgraph L3["Level 3: 多分支聚合 (Multi-branch Aggregation)"]
+        AA["🔗 Aggregation Agent"]
+        AA --> AA1["node 模式: 分析各分支最佳最终方案"]
+        AA --> AA2["trajectory 模式: 分析完整进化路径"]
+    end
+
+    L1 -->|"停滞加深"| L2
+    L2 -->|"全局停滞 + 时间窗口"| L3
+
+    style L1 fill:#fce4ec
+    style L2 fill:#fff9c4
+    style L3 fill:#f3e5f5
 ```
 
 ### 4.8 全局记忆与混合检索
@@ -943,17 +1238,27 @@ keyword_similarity: 基于 TF-IDF 的关键词匹配
 
 当启用全局记忆时，Improve Agent 使用两阶段规划：
 
-```
-Stage 1: generate_initial_plan()
-  ├── 输入: 任务描述 + 当前代码 + 执行结果 + 记忆
-  ├── 检索不相似的历史记录 (促进探索新方向)
-  └── 输出: 自由文本形式的改进计划
+```mermaid
+flowchart LR
+    subgraph Stage1["Stage 1: generate_initial_plan()"]
+        S1In["输入:<br>任务描述 + 当前代码<br>+ 执行结果"]
+        S1Mem["检索不相似的历史记录<br>(促进探索新方向)"]
+        S1Out["输出:<br>自由文本改进计划"]
+        S1In --> S1Mem --> S1Out
+    end
 
-Stage 2: refine_plan_to_json()
-  ├── 检索相似的成功记录 (label=1)
-  ├── 检索相似的失败记录 (label=-1)
-  ├── 构建 refinement_guidance
-  └── 输出: 结构化 JSON 计划 {reason, module[], plan{}}
+    subgraph Stage2["Stage 2: refine_plan_to_json()"]
+        S2Succ["检索相似成功记录<br>(label=1)"]
+        S2Fail["检索相似失败记录<br>(label=-1)"]
+        S2Guide["构建<br>refinement_guidance"]
+        S2Out["输出: 结构化 JSON 计划<br>{reason, module[], plan{}}"]
+        S2Succ & S2Fail --> S2Guide --> S2Out
+    end
+
+    Stage1 -->|"初始计划文本"| Stage2
+
+    style Stage1 fill:#e3f2fd
+    style Stage2 fill:#e8f5e9
 ```
 
 ### 4.9 探索常数衰减算法
@@ -999,44 +1304,49 @@ LLM 直接输出完整的 Python 脚本。用于 Draft 和 Fallback 场景。
 
 对于 Improve/Evolution/Fusion 场景，使用增量修改：
 
-```
-Planner → 生成结构化 JSON 计划
-  │
-  ├── module: ["data_processing_and_feature_engineering", "model_design"]
-  └── plan: {module_name: "详细修改计划..."}
-  │
-  ▼
-Diff Coder → 对每个 module 生成 SEARCH/REPLACE 块
-  │
-  ├── <<<<<<< SEARCH
-  │   [原始代码精确匹配]
-  │   =======
-  │   [修改后的代码]
-  │   >>>>>>> REPLACE
-  │
-  ▼
-SearchReplacePatcher → 应用补丁
-  │
-  ├── 精确匹配 SEARCH 块
-  ├── 模糊匹配回退 (忽略空白差异)
-  ├── 多轮重试 (最多 3 次)
-  └── 输出: 修改后的完整代码
+```mermaid
+flowchart TD
+    P["🧠 Planner<br>生成结构化 JSON 计划"]
+    P --> J["module: [data_processing, model_design]<br>plan: {module: 详细修改计划}"]
+
+    J --> DC["✏️ Diff Coder<br>对每个 module 生成 SEARCH/REPLACE"]
+    DC --> Patch["SEARCH/REPLACE 块"]
+
+    Patch --> SRP["🔧 SearchReplacePatcher"]
+    SRP --> Exact{"精确匹配?"}
+    Exact -->|是| Apply["应用补丁"]
+    Exact -->|否| Fuzzy{"模糊匹配?"}
+    Fuzzy -->|是| Apply
+    Fuzzy -->|否| Retry{"重试 < 3次?"}
+    Retry -->|是| DC
+    Retry -->|否| Fallback["回退到全量重写"]
+
+    Apply --> Out["修改后的完整代码"]
+    Fallback --> Out
+
+    style P fill:#e3f2fd
+    style DC fill:#e8f5e9
+    style SRP fill:#fff3e0
 ```
 
 **Stepwise 代码生成** (用于 Draft)：
 
-```
-StepAgent("data_processing_and_feature_engineering")
-  → 数据加载 + 特征工程代码
-     │
-StepAgent("model_design")
-  → 模型架构 + 损失函数 + 优化器
-     │
-StepAgent("training_evaluation")
-  → 训练循环 + 验证 + 推理 + 提交
-     │
-MetaAgent.merge()
-  → 智能合并为单一可执行脚本
+```mermaid
+flowchart LR
+    S1["🗃️ StepAgent<br>data_processing<br>数据加载 + 特征工程"]
+    S2["🏗️ StepAgent<br>model_design<br>模型架构 + 损失 + 优化器"]
+    S3["🏋️ StepAgent<br>training_evaluation<br>训练 + 验证 + 推理 + 提交"]
+    MA["🔗 MetaAgent.merge()<br>智能合并为单一<br>可执行脚本"]
+
+    S1 -->|"代码片段 1"| S2
+    S2 -->|"代码片段 1+2"| S3
+    S3 -->|"所有代码片段"| MA
+    MA --> Final["📄 完整 Python 脚本"]
+
+    style S1 fill:#e3f2fd
+    style S2 fill:#f3e5f5
+    style S3 fill:#fff3e0
+    style MA fill:#e8f5e9
 ```
 
 ---
@@ -1045,66 +1355,77 @@ MetaAgent.merge()
 
 ### 5.1 整体架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Entry Points                          │
-│  run.py (CLI)  │  __init__.py (API)  │  Shell Scripts   │
-└────────────────────────┬────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────┐
-│                   Config Layer                           │
-│  config/__init__.py + config.yaml + OmegaConf           │
-└────────────────────────┬────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────┐
-│              Engine Layer (搜索协调)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ AgentSearch  │  │ NodeSelection│  │  Evaluation   │   │
-│  │ (协调器)     │  │ (节点选择)   │  │  (评估反传)  │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ SearchNode   │  │  Execution   │  │SolutionManager│  │
-│  │ + Journal    │  │  (验证)      │  │  (解管理)     │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │  Conditions  │  │   Executor   │                     │
-│  │ (触发条件)   │  │ (子进程执行) │                     │
-│  └──────────────┘  └──────────────┘                     │
-└────────────────────────┬────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────┐
-│             Agent Layer (多智能体)                        │
-│  ┌──────┐ ┌───────┐ ┌─────┐ ┌─────────┐ ┌──────┐      │
-│  │Draft │ │Improve│ │Debug│ │Evolution│ │Fusion│      │
-│  └──────┘ └───────┘ └─────┘ └─────────┘ └──────┘      │
-│  ┌──────────┐ ┌──────────┐ ┌───────────┐ ┌──────────┐ │
-│  │Aggregation│ │CodeReview│ │ResultParse│ │DataLeakage│ │
-│  └──────────┘ └──────────┘ └───────────┘ └──────────┘ │
-│                                                         │
-│  ┌─────────────────────────────────────────┐            │
-│  │ Sub-systems                              │            │
-│  │ ┌─────────┐ ┌────────┐ ┌─────────────┐ │            │
-│  │ │ Planner │ │ Coder  │ │   Memory    │ │            │
-│  │ │(规划器) │ │(代码器)│ │(全局记忆)   │ │            │
-│  │ └─────────┘ └────────┘ └─────────────┘ │            │
-│  └─────────────────────────────────────────┘            │
-└────────────────────────┬────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────┐
-│               LLM Abstraction Layer                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐          │
-│  │ __init__ │  │  Gemini  │  │ OpenAI Compat│          │
-│  │ (路由器) │  │ Backend  │  │   Backend    │          │
-│  └──────────┘  └──────────┘  └──────────────┘          │
-└────────────────────────┬────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────┐
-│            Validation Layer (验证层)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ FormatServer │  │ FormatClient │  │ QualityCheck │   │
-│  │ (Flask HTTP) │  │  (HTTP 客户) │  │  (质量检查)  │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Entry["🚪 Entry Points"]
+        RunPy["run.py<br>(CLI)"]
+        InitPy["__init__.py<br>(API)"]
+        Shell["Shell Scripts"]
+    end
+
+    subgraph Config["⚙️ Config Layer"]
+        CfgInit["config/__init__.py"]
+        CfgYAML["config.yaml"]
+        Omega["OmegaConf"]
+    end
+
+    subgraph Engine["🔧 Engine Layer (搜索协调)"]
+        AS["AgentSearch<br>协调器"]
+        NS["NodeSelection<br>节点选择"]
+        EV["Evaluation<br>评估反传"]
+        SN["SearchNode<br>+ Journal"]
+        EX["Execution<br>验证"]
+        SM["SolutionManager<br>解管理"]
+        CD["Conditions<br>触发条件"]
+        INT["Executor<br>子进程执行"]
+    end
+
+    subgraph Agents["🤖 Agent Layer (多智能体)"]
+        direction TB
+        subgraph CoreAgents["核心 Agent"]
+            Draft["Draft"]
+            Improve["Improve"]
+            Debug["Debug"]
+            Evolution["Evolution"]
+            Fusion["Fusion"]
+            Aggregation["Aggregation"]
+        end
+        subgraph SupportAgents["辅助 Agent"]
+            CodeReview["CodeReview"]
+            ResultParse["ResultParse"]
+            DataLeakage["DataLeakage"]
+        end
+        subgraph SubSys["子系统"]
+            Planner["Planner<br>规划器"]
+            Coder["Coder<br>代码生成"]
+            Memory["Memory<br>全局记忆"]
+        end
+    end
+
+    subgraph LLM["🧠 LLM Abstraction Layer"]
+        Router["__init__.py<br>路由器"]
+        Gemini["Gemini<br>Backend"]
+        OpenAI["OpenAI Compat<br>Backend"]
+    end
+
+    subgraph Validation["✅ Validation Layer"]
+        FS["FormatServer<br>(Flask)"]
+        FC["FormatClient"]
+        QC["QualityCheck"]
+    end
+
+    Entry --> Config --> Engine
+    Engine --> Agents
+    Agents --> LLM
+    Agents --> Validation
+    Engine --> INT
+
+    style Entry fill:#e3f2fd
+    style Config fill:#f5f5f5
+    style Engine fill:#e8f5e9
+    style Agents fill:#fff3e0
+    style LLM fill:#f3e5f5
+    style Validation fill:#fce4ec
 ```
 
 ### 5.2 Agent 子系统
@@ -1193,53 +1514,75 @@ llm/__init__.py
 
 ### 5.5 代码生成子系统
 
-```
-agents/coder/
-  │
-  ├── base_coder.py (plan_and_code_query)
-  │   └── 单次 LLM 调用生成 plan + code
-  │       ├── extract_text_up_to_code() → plan
-  │       └── extract_code() → code
-  │
-  ├── stepwise_coder.py (stepwise_plan_and_code_query)
-  │   └── 多 Agent 分步生成
-  │       ├── StepAgent × 3 (data_prep → model → training)
-  │       └── MetaAgent.merge() → 合并为完整脚本
-  │
-  └── diff_coder/ (diff_generate_and_apply)
-      ├── prompts.py → SEARCH/REPLACE 格式提示
-      ├── diff_generate.py → 按模块生成 diff
-      ├── patcher.py → SearchReplacePatcher (补丁应用)
-      └── apply.py → 多模块串行应用 + 重试逻辑
+```mermaid
+graph TB
+    subgraph Coder["agents/coder/"]
+        subgraph Base["base_coder.py"]
+            BC["plan_and_code_query()"]
+            BC --> BC1["单次 LLM 调用"]
+            BC1 --> BC2["extract_text_up_to_code() → plan"]
+            BC1 --> BC3["extract_code() → code"]
+        end
+
+        subgraph Stepwise["stepwise_coder.py"]
+            SW["stepwise_plan_and_code_query()"]
+            SW --> SA1["StepAgent: data_processing"]
+            SW --> SA2["StepAgent: model_design"]
+            SW --> SA3["StepAgent: training_evaluation"]
+            SA1 & SA2 & SA3 --> MA["MetaAgent.merge()"]
+        end
+
+        subgraph Diff["diff_coder/"]
+            DGA["diff_generate_and_apply()"]
+            DGA --> PR["prompts.py<br>SEARCH/REPLACE 格式"]
+            DGA --> DG["diff_generate.py<br>按模块生成 diff"]
+            DGA --> PT["patcher.py<br>SearchReplacePatcher"]
+            DGA --> AP["apply.py<br>多模块串行 + 重试"]
+        end
+    end
+
+    Draft["DraftAgent"] -->|"初始方案"| Stepwise
+    Draft -->|"回退"| Base
+    Improve["ImproveAgent"] -->|"增量改进"| Diff
+    Improve -->|"回退"| Base
+    Evolution["EvolutionAgent"] --> Diff
+    Fusion["FusionAgent"] --> Diff
+
+    style Base fill:#e3f2fd
+    style Stepwise fill:#e8f5e9
+    style Diff fill:#fff3e0
 ```
 
 ### 5.6 验证与质量保障子系统
 
-```
-验证管线 (Pipeline)：
-  │
-  ├─(1)─ 提交文件存在性检查
-  │      └── submission/submission_{id}.csv 是否存在
-  │
-  ├─(2)─ metric == 0.0 异常检查
-  │      └── maximize=True 且 metric=0.0 → 标记为 buggy
-  │
-  ├─(3)─ mlebench 格式验证 (HTTP)
-  │      ├── FormatServer (Flask) → /validate 端点
-  │      ├── 使用 mlebench.validate_submission()
-  │      └── 失败 → LLM 辅助修复 → 重试
-  │
-  ├─(4)─ 内容质量检查
-  │      └── 常量列检测: >95% 相同值 → 标记为 buggy
-  │          (防止虚假/常量预测)
-  │
-  ├─(5)─ 指标方向一致性验证
-  │      └── 比较 LLM 返回的 lower_is_better 与预设
-  │
-  └─(6)─ 数据泄露检测
-         ├── 触发条件: metric == 1.0 (max) 或 == 0.0 (min)
-         ├── DataLeakageAgent: LLM 审查代码
-         └── 高/中置信度泄露 → 标记为 buggy
+```mermaid
+graph LR
+    subgraph Pipeline["验证管线 (6 步)"]
+        direction LR
+        V1["1️⃣ 文件存在<br>submission_{id}.csv"]
+        V2["2️⃣ 零值异常<br>metric==0 且 maximize"]
+        V3["3️⃣ 格式验证<br>mlebench /validate"]
+        V4["4️⃣ 内容质量<br>常量列 >95%"]
+        V5["5️⃣ 方向一致<br>lower_is_better"]
+        V6["6️⃣ 泄露检测<br>极端值审查"]
+
+        V1 -->|"✅ 通过"| V2
+        V2 -->|"✅ 通过"| V3
+        V3 -->|"✅ 通过"| V4
+        V4 -->|"✅ 通过"| V5
+        V5 -->|"✅ 通过"| V6
+        V6 -->|"✅ 通过"| OK["✅ Valid Node"]
+    end
+
+    V1 -->|"❌ 不存在"| BUG["❌ Buggy"]
+    V2 -->|"❌ 零值"| BUG
+    V3 -->|"❌ 格式错"| BUG
+    V4 -->|"❌ 常量预测"| BUG
+    V5 -->|"❌ 方向不一致"| BUG
+    V6 -->|"❌ 高置信度泄露"| BUG
+
+    style OK fill:#e8f5e9,stroke:#43a047
+    style BUG fill:#ffebee,stroke:#e53935
 ```
 
 ---
@@ -1301,29 +1644,31 @@ coldstart.model_json_path: "engine/coldstart/models_guidance_classified.json"
 
 ### 6.2 关键参数交互关系
 
-```
-                   num_drafts (5)
-                       │
-                       ▼
-  ┌──────────── 分支数量上限 ─────────────┐
-  │                                       │
-  │  num_improves (3) ◄── 每节点改进上限   │
-  │       │                               │
-  │       ▼                               │
-  │  max_improve_failure (3) ◄── 终止判定  │
-  │       │                               │
-  │       ▼                               │
-  │  branch_stagnation_threshold (3)      │
-  │       │                               │
-  │       ▼                               │
-  │  停滞? ──► evolution / fusion         │
-  │                                       │
-  │  explore_switch_{start,end}           │
-  │       │                               │
-  │       ▼                               │
-  │  UCT ◄──► Top-K (时间驱动切换)        │
-  │                                       │
-  └───────────────────────────────────────┘
+```mermaid
+flowchart TD
+    ND["num_drafts = 5<br>分支数量上限"]
+    NI["num_improves = 3<br>每节点改进上限"]
+    MIF["max_improve_failure = 3<br>终止判定"]
+    BST["branch_stagnation_threshold = 3<br>停滞检测"]
+    EF["evolution / fusion<br>策略切换"]
+    ES["explore_switch_start=0.5<br>explore_switch_end=0.7"]
+    UCT["UCT 探索"]
+    TopK["Top-K 利用"]
+    TL["time_limit = 43200<br>时间限制"]
+
+    ND -->|"控制"| NI
+    NI -->|"超限"| MIF
+    MIF -->|"达到"| BST
+    BST -->|"停滞触发"| EF
+    TL -->|"时间进度"| ES
+    ES -->|"权重切换"| UCT
+    ES -->|"权重切换"| TopK
+    UCT <-->|"软切换"| TopK
+
+    style ND fill:#e3f2fd
+    style EF fill:#fff9c4
+    style UCT fill:#e8f5e9
+    style TopK fill:#fce4ec
 ```
 
 ---
@@ -1332,42 +1677,40 @@ coldstart.model_json_path: "engine/coldstart/models_guidance_classified.json"
 
 ### 7.1 端到端数据流
 
-```
-输入数据                    LLM 服务                输出结果
-──────                    ────────                ────────
+```mermaid
+flowchart LR
+    subgraph Input["📥 输入"]
+        DataDir["data_dir/<br>train.csv<br>test.csv<br>sample_sub.csv"]
+        TaskDesc["task_desc<br>任务描述"]
+    end
 
-data_dir/               ┌──────────┐
-├── train.csv  ──────►  │          │
-├── test.csv            │  Gemini  │
-└── sample_sub.csv      │    or    │
-                        │  OpenAI  │           runs/{exp_name}/
-task_desc ─────────────►│          │           ├── logs/
-                        └──────────┘           │   ├── journal.json
-                             │                 │   ├── filtered_journal.json
-                             │                 │   ├── config.yaml
-                             ▼                 │   └── best_solution.py
-                     ┌──────────────┐          ├── workspace/
-                     │  SearchNode  │          │   ├── input/ (数据)
-                     │  (plan+code) │          │   ├── submission/
-                     └──────┬───────┘          │   │   ├── submission_{id1}.csv
-                            │                  │   │   ├── submission_{id2}.csv
-                            ▼                  │   │   └── ...
-                     ┌──────────────┐          │   ├── best_solution/
-                     │  Interpreter │          │   │   ├── solution.py
-                     │  (subprocess)│          │   │   ├── metric.txt
-                     └──────┬───────┘          │   │   └── node_id.txt
-                            │                  │   ├── best_submission/
-                            ▼                  │   │   └── submission.csv
-                     ┌──────────────┐          │   ├── top_solution/
-                     │ Execution    │          │   │   ├── top1/{solution,submission,metric}
-                     │ Result       │          │   │   ├── top2/...
-                     └──────┬───────┘          │   │   └── topN/...
-                            │                  │   └── global_memory/
-                            ▼                  │       └── records.json
-                     ┌──────────────┐          └── ...
-                     │ Validation   │
-                     │ + Evaluation │
-                     └──────────────┘
+    subgraph Core["⚙️ 处理核心"]
+        LLM["🧠 LLM Service<br>(Gemini / OpenAI)"]
+        SN["SearchNode<br>plan + code"]
+        Interp["Interpreter<br>subprocess 执行"]
+        ExecRes["ExecutionResult"]
+        Valid["Validation<br>+ Evaluation"]
+    end
+
+    subgraph Output["📤 输出"]
+        Logs["logs/<br>journal.json<br>config.yaml<br>best_solution.py"]
+        Sub["submission/<br>submission_{id}.csv"]
+        Best["best_solution/<br>solution.py<br>metric.txt"]
+        Top["top_solution/<br>top1~topN/"]
+        Mem["global_memory/<br>records.json"]
+    end
+
+    DataDir --> LLM
+    TaskDesc --> LLM
+    LLM --> SN
+    SN --> Interp
+    Interp --> ExecRes
+    ExecRes --> Valid
+    Valid --> Logs & Sub & Best & Top & Mem
+
+    style Input fill:#e3f2fd
+    style Core fill:#fff3e0
+    style Output fill:#e8f5e9
 ```
 
 ### 7.2 Journal 序列化格式
